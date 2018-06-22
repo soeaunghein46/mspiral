@@ -1,0 +1,183 @@
+<?php
+
+/**
+ * Implements hook_nodequeue_info()
+ */
+function nodequeuequeue_nodequeue_info() {
+  return array('nodequeuequeue' => array(
+    'title' => t('Nodequeue queue'),
+    'description' => t('Each nodequeue has its own subqueue.'),
+    ));
+}
+
+/**
+ * Implements callback NODEQUEUEOWNER_nodequeue_form()
+ */
+function nodequeuequeue_nodequeue_form($queue, &$form) {
+  // See all available nodequeues.  @TODO remove nodequeuequeue queues.
+  $queues = nodequeue_load_queues(nodequeue_get_all_qids());
+  foreach ($queues as $qid => $queue) {
+    $options[$qid] = check_plain($queue->name);
+  }
+
+  $form['placeholder']['queues'] = array(
+    '#type' => 'checkboxes',
+    '#title' => t('Nodequeues [NOT IMPLEMENTED YET]'),
+    '#description' => t('Select which Nodequeues should automatically produce a subqueue based on these settings.'),
+    '#options' => $options,
+  );
+
+  $form['subqueue_title'] = array(
+    '#type' => 'textfield',
+    '#title' => t('Subqueue title [NOT USED]'),
+    '#default_value' => $queue->subqueue_title ? $queue->subqueue_title : '%subqueue',
+    '#size' => 50,
+    '#maxlength' => 64,
+    '#description' => t('What to display for the subqueue title; use %subqueue to embed the actual subqueue title. This is used to distinguish multiple nodequeues with subqueues from each other, as internal subqueue title is filled automatically.'),
+  );
+
+  if (!empty($queue->qid)) {
+    $form['placeholder']['queues']['#disabled'] = TRUE;
+    $form['placeholder']['queues']['#default_value'] = explode('-', $queue->reference);
+  }
+}
+
+/**
+ * Implements callback NODEQUEUEOWNER_nodequeue_form_validate().
+ */
+function nodequeuequeue_nodequeue_form_validate($queue, &$form_state, &$form) {
+  if (!isset($queue->qid)) {
+    $qids = array_keys(array_filter($form_state['values']['queues']));
+    if (!empty($qids)) {
+      // Convert this to our reference.
+      form_set_value($form['reference'], implode('-', $qids), $form_state);
+    }
+  }
+}
+
+/**
+ * Implements callback NODEQUEUEOWNER_nodequeue_form_submit_finish().
+ */
+function nodequeuequeue_nodequeue_form_submit_finish($queue, $form_state) {
+}
+
+/**
+ * Implements callback QUEUEOWNER_nodequeue_subqueues().
+ *
+ * Fetches a list of subqueues that are valid for this node.
+ *
+ * Note that this function receives a single queue object.  This is the model
+ * for the subqueues that will be created (if any).
+ */
+function nodequeuequeue_nodequeue_subqueues(&$queue, $node) {
+  // Eventually, we will probably want to allow people to explicitly include or
+  // exclude individual Nodequeues or types of Nodequeues (by owner) from the
+  // smart queues that are automatically generated.  For now however *every*
+  // Nodequeue (except for Nodequeuequeue Nodequeues, as that would be silly as
+  // well as recursive) is a potential raison d'etre for our subqueue.
+  // $qids = explode('-', $queue->references);
+  // $result = db_query("SELECT qid FROM {nodequeue_types} WHERE type = :type AND reference IN (:qids)", array(':type' => $node->type, ':qids' => $qids));
+  $result = db_query("SELECT nt.qid, title FROM {nodequeue_types} nt LEFT JOIN {nodequeue_queue} nq ON nt.qid = nq.qid WHERE nt.type = :type AND nq.owner <> 'nodequeuequeue'", array(':type' => $node->type));
+  // @TODO use the all-in-one fetch function.
+  $referenced_queues = array();
+  foreach ($result as $obj) {
+    $referenced_queues[$obj->qid] = $obj->title;
+  }
+  
+  if (empty($referenced_queues)) {
+    return;
+  }
+
+  // We're returning an array of references for efficiency, but we also have
+  // to check to see if the references we've generated exist. If they don't,
+  // we have to create them.
+  $exists = array();
+  $subqueues = nodequeue_load_subqueues_by_reference(array($queue->qid => array_keys($referenced_queues)));
+  foreach ($subqueues as $subqueue) {
+    $exists[$subqueue->reference] = TRUE;
+  }
+
+  foreach ($referenced_queues as $rqid => $referenced_queue_title) {
+    if (empty($exists[$rqid])) {
+      // Name the subqueue with a combination of the parent queue title and the
+      // title of the Nodequeue our subqueue references.
+      $title = $queue->title . ' ' . $referenced_queue_title;
+      nodequeue_add_subqueue($queue, $title, $rqid);
+    }
+  }
+  $references = array_keys($referenced_queues);
+  return $references;
+}
+
+/**
+ * Implements hook_nodequeue_add().
+ *
+ * If a node is added to our queue, we add it to the referenced queue too.
+ */
+function nodequeuequeue_nodequeue_add($sqid, $nid) {
+  $subqueue = nodequeue_load_subqueue($sqid);
+  $queue = nodequeue_load($subqueue->qid);
+
+  if ($queue->owner == 'nodequeuequeue') {
+    $referenced_queue = nodequeue_load($subqueue->reference);
+    // Our own nodequeuequeue's reference is to a main queue, so we must use it
+    // to look up the subqueue (rather than trying the other way around, which
+    // results in nodes getting added to queues seemingly at random.
+    // IMPORTANT: This can only work reliably for normal, one-subqueue queues.
+    $rsqid = db_select('nodequeue_subqueue', 'ns')
+      ->fields('ns', array('sqid'))
+      ->condition('qid', $referenced_queue->qid)
+      ->range(0, 1)
+      ->execute()
+      ->fetchField();
+    // Could also use, instead of SQL above and the function below, the
+    // function nodequeue_load_subqueues_by_queue() but it expects to return
+    // multiple and does not cache anyway.
+    $referenced_subqueue = nodequeue_load_subqueue($rsqid);
+
+    // Work around a bug/feature of Nodequeue where it allows one node to be
+    // added to a queue multiple times.  We don't want that happening here.
+    if (!nodequeue_get_subqueue_position($referenced_subqueue->sqid, $nid)) {
+      nodequeue_subqueue_add($referenced_queue, $referenced_subqueue, $nid);
+    }
+  }
+}
+
+/**
+ * Implements hook_nodequeue_remove().
+ *
+ * If a node is removed from the main queue, it can no longer be in our queue.
+function nodequeuequeue_nodequeue_remove($sqid, $nid) {
+  $subqueue = nodequeue_load_subqueue($sqid);
+  $queue = nodequeue_load($subqueue->qid);
+
+  // To be consistent with our nodequeue_add hook this would be 'is not equal
+  // to nodequeuequeue', however, we need to address that we should probably
+  // not take action on any smart queue.  Maybe.  Playing it safe here for now.
+  if ($queue->owner == 'nodequeue') {
+    // Look up whether any nodequeuequeue subqueues reference this queue.
+    // @TODO
+  }
+}
+ */
+
+/**
+ * Implements hook_nodequeue_somealteronsavething
+// @TODO Update our smartqueue names queue name on a nodequeue alter function.
+// Requires that Nodequeue call hooks at save and delete: http://drupal.org/node/1276114
+function nodequeuequeue_nodequeue_($op, $type, $array = NULL) {
+
+            nodequeue_subqueue_update_title($row->sqid, $title);
+          }
+          break;
+
+  // If a nodequeue was deleted, we need to delete any subqueues honoring it.
+        case 'delete':
+            nodequeue_remove_subqueue($row->sqid);
+          }
+          break;
+      }
+  }
+}
+*/
+

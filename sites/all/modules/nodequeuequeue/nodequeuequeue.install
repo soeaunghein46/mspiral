@@ -1,0 +1,14 @@
+<?php
+
+/**
+ * @file
+ * Install, update and uninstall functions for the Nodequeue queue module.
+ */
+
+/**
+ * Implements hook_install().
+ */
+function nodequeuequeue_install() {
+  // @TODO make link.
+  drupal_set_message("Create a new Nodequeue queue at admin/structure/nodequeue.");
+}
